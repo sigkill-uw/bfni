@@ -426,58 +426,70 @@ section .text
 
 		;Push the registers that we'll be munging with
 		push esi
-		push ecx
+		;push ecx ;This isn't actually necessary, since ecx has no significance when dh is 0
 
 		;Switch
 		cmp dh, '+'
 		je compile_add
 		cmp dh, '>'
-		je compile_move
+		je compile_shift
 
 		;Nop
 		jmp write_current_op_return
 
 		;Addition/subtraction
+		;Convention note: since this is an 8 bit operation, the 'count' field is cl;
+		;thus we shouldn't have to do any witchcraft for negative values
 		compile_add:
 			;Special cases for movements by one cell
-			cmp ecx, 1
+			cmp cl, 1
 			je compile_add_inc
-			cmp ecx, -1
+			cmp cl, -1
 			je compile_add_dec
 
 			;General case
+
+			;Gonna need this later
+			push ecx
 
 			;Copy the header for the operation
 			mov ecx, add_long_length
 			mov esi, add_long
 			call write_to_output
-			mov esi, [esp + 4 * 1]
+			mov esi, [esp + 4 * 1] ;Restore input pointer
 
 			;We need a few bytes in the output buffer to output the relevant integer:
-			;`-0xNN\n` -> 6 bytes
+			;`0xNN\n` -> 5 bytes
 
 			cmp edi, BUFFER_SIZE - 5
 			jl compile_add_no_flush
 
 			call flush_output_buffer
 			compile_add_no_flush:
+				;0x
 				mov byte [obuffer + edi], '0'
 				mov byte [obuffer + edi + 1], 'x'
 
+				;High-order nybble
+				mov ecx, [esp]
 				shr ecx, 4
 				and ecx, 0x0F
 				mov ch, [hex_table + ecx]
 				mov byte [obuffer + edi + 2], ch
 
+				;Low-order nybble
 				mov ecx, [esp]
 				and ecx, 0x0F
 				mov ch, [hex_table + ecx]
 				mov byte [obuffer + edi + 3], ch
 
+				;Newline
 				mov byte [obuffer + edi + 4], `\n`
 
+				;Shift index
 				add edi, 5
 
+			pop ecx
 			jmp write_current_op_return
 
 			;Increments/decrements are basically just string copies
@@ -492,12 +504,84 @@ section .text
 				call write_to_output
 				jmp write_current_op_return
 
-		compile_move:
-			cmp ecx, 1
-			cmp ecx, -1
+		compile_shift:
+			;Special cases for short shifts
+			cmp cx, 1
+			je compile_shift_right
+			cmp cx, -1
+			je compile_shift_left
+
+			;General case
+			push ecx ;Gonna need this later, again
+
+			;Copy the header for the operation
+			mov ecx, shift_long_length
+			mov esi, shift_long
+			call write_to_output
+			mov esi, [esp + 4 * 1] ;Restore input pointer
+
+			;We need a few more bytes to print the offset for this
+			;`0xNNNN\n` -> 7 bytes
+
+			cmp edi, BUFFER_SIZE - 7
+			jl compile_add_no_flush
+
+			call flush_output_buffer
+			compile_shift_no_flush:
+				;0x
+				mov byte [obuffer + edi], '0'
+				mov byte [obuffer + edi + 1], 'x'
+
+				;High-order nybble of high-order byte
+				mov ecx, [esp]
+				shr ecx, 12
+				and ecx, 0x0F
+				mov ch, [hex_table + ecx]
+				mov byte [obuffer + edi + 2], ch
+
+				;Low-order nybble of high-order byte
+				mov ecx, [esp]
+				shr ecx, 8
+				and ecx, 0x0F
+				mov ch, [hex_table + ecx]
+				mov byte [obuffer + edi + 3], ch
+
+				;High-order nybble of low-order byte
+				mov ecx, [esp]
+				shr ecx, 4
+				and ecx, 0x0F
+				mov ch, [hex_table + ecx]
+				mov byte [obuffer + edi + 4], ch
+
+				;Low-order nybble of lower-order byte
+				mov ecx, [esp]
+				and ecx, 0x0F
+				mov ch, [hex_table + ecx]
+				mov byte [obuffer + edi + 5], ch
+
+				;Newline
+				mov byte [obuffer + edi + 6], `\n`
+
+				;Shift index
+				add edi, 7
+
+			pop ecx
+			jmp write_current_op_return
+
+			;Special cases
+			compile_shift_right:
+				mov ecx, shift_right_length
+				mov esi, shift_right
+				call write_to_output
+				jmp write_current_op_return
+			compile_shift_left:
+				mov ecx, shift_left_length
+				mov esi, shift_left
+				jmp write_current_op_return
+
 			jmp write_current_op_return
 
 		write_current_op_return:
-			pop ecx
+			xor dh, dh
 			pop esi
 			ret
