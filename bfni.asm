@@ -47,24 +47,24 @@ section .data
 	header:
 		db `global _start\n`
 		db `section .data\n`
-		db `	tape: times 0xffff db 0x00\n`
+		db `	tape: times 0x10000 db 0x00\n`
 		db `section .text\n`
 		db `	read_character:\n`
 		db `		mov eax, 3\n`
 		db `		mov ebx, 0\n`
-		db `		lea ecx, [tape + si]\n`
+		db `		lea ecx, [tape + esi]\n`
 		db `		mov edx, 1\n`
 		db `		int 0x80\n`
 		db `		ret\n`
 		db `	write_character:\n`
 		db `		mov eax, 4\n`
 		db `		mov ebx, 1\n`
-		db `		lea ecx, [tape + si]\n`
+		db `		lea ecx, [tape + esi]\n`
 		db `		mov edx, 1\n`
 		db `		int 0x80\n`
 		db `		ret\n`
 		db `	_start:\n`
-		db `		xor si, si\n`
+		db `		xor esi, esi\n`
 	header_length: equ $-header
 	times (BUFFER_SIZE - header_length) db 0
 
@@ -91,35 +91,37 @@ section .data
 
 	;Compiled code for a decrement of the current tape value
 	add_minus:
-		db `		dec byte [tape + si]\n`
+		db `		dec byte [tape + esi]\n`
 	add_minus_length: equ $-add_minus
 
 	;Compiled code for an increment of the current tape value
 	add_plus:
-		db `		inc byte [tape + si]\n`
+		db `		inc byte [tape + esi]\n`
 	add_plus_length: equ $-add_plus
 
 	;Compiled code for an arbitrary addition/subtraction
 	add_long:
-		db `		add byte [tape + si], `
+		db `		add byte [tape + esi], `
 	add_long_length: equ $-add_long
 
 	;Compiled code for a loop opening
 	loop_open:
-		db `		cmp byte [tape + si], 0\n`
+		db `		cmp byte [tape + esi], 0\n`
 		db `		je e`
 	loop_open_length: equ $-loop_open
 
 	;Compiled code for a loop closing
 	loop_close:
-		db `		cmp byte [tape + si], 0\n`
+		db `		cmp byte [tape + esi], 0\n`
 		db `		jne b`
 	loop_close_length: equ $-loop_close
 
+	;Compiled code for character input
 	input:
 		db `		call read_character\n`
 	input_length: equ $-input
 
+	;Compiled code for character output
 	output:
 		db `		call write_character\n`
 	output_length: equ $-output
@@ -281,9 +283,57 @@ section .text
 					jmp op_none
 
 				op_loop_open:
+					call flush_last_op
+
+					push esi
+					mov esi, loop_open
+					mov ecx, loop_open_length
+					call write_to_output
+					pop esi
+
+					inc ebx
+					mov ecx, ebx
+					call write_ecx_to_output
+
+					cmp edi, BUFFER_SIZE - 4
+					jl .no_flush
+					call flush_output_buffer
+					.no_flush:
+
+					mov dword[obuffer + edi], `\n\t\tb`
+					add edi, 4
+					call write_ecx_to_output
+					mov byte [obuffer + edi], ':'
+					mov byte [obuffer + edi + 1], `\n`
+					add edi, 2
+
+					push ebx
 					jmp op_none
 
 				op_loop_close:
+					call flush_last_op
+
+					push esi
+					mov esi, loop_close
+					mov ecx, loop_close_length
+					call write_to_output
+					pop esi
+
+					pop ecx
+					call write_ecx_to_output
+
+					cmp edi, BUFFER_SIZE - 4
+					jl .no_flush
+					call flush_output_buffer
+					.no_flush:
+
+					mov dword[obuffer + edi], `\n\t\te`
+					add edi, 4
+					call write_ecx_to_output
+					mov byte [obuffer + edi], ':'
+					mov byte [obuffer + edi + 1], `\n`
+					add edi, 2
+
 					jmp op_none
 
 				op_none:
@@ -524,7 +574,7 @@ section .text
 			;`0xNNNN\n` -> 7 bytes
 
 			cmp edi, BUFFER_SIZE - 7
-			jl compile_add_no_flush
+			jl compile_shift_no_flush
 
 			call flush_output_buffer
 			compile_shift_no_flush:
@@ -577,6 +627,7 @@ section .text
 			compile_shift_left:
 				mov ecx, shift_left_length
 				mov esi, shift_left
+				call write_to_output
 				jmp write_current_op_return
 
 			jmp write_current_op_return
@@ -585,3 +636,78 @@ section .text
 			xor dh, dh
 			pop esi
 			ret
+
+	write_ecx_to_output:
+		push ecx
+
+		;`NNNNNNNN` -> 8 bytes required,
+		;but we'll flush sooner than that since we're sticking up to 2 characters on the end
+		cmp edi, BUFFER_SIZE - 10
+		jl .no_flush
+
+		call flush_output_buffer
+
+		.no_flush:
+			;No 0x since this is going to be used with labels
+			;Massive unrolled loop below
+
+			;Nnnnnnnn
+			mov ecx, [esp]
+			shr ecx, 28
+			and ecx, 0x0F
+			mov ch, [hex_table + ecx]
+			mov byte [obuffer + edi + 0], ch
+
+			;0xnNnnnnnn
+			mov ecx, [esp]
+			shr ecx, 24
+			and ecx, 0x0F
+			mov ch, [hex_table + ecx]
+			mov byte [obuffer + edi + 1], ch
+
+			;0xnnNnnnnn
+			mov ecx, [esp]
+			shr ecx, 20
+			and ecx, 0x0F
+			mov ch, [hex_table + ecx]
+			mov byte [obuffer + edi + 2], ch
+
+			;nnnNnnnn
+			mov ecx, [esp]
+			shr ecx, 16
+			and ecx, 0x0F
+			mov ch, [hex_table + ecx]
+			mov byte [obuffer + edi + 3], ch
+
+			;nnnnNnnn
+			mov ecx, [esp]
+			shr ecx, 12
+			and ecx, 0x0F
+			mov ch, [hex_table + ecx]
+			mov byte [obuffer + edi + 4], ch
+
+			;nnnnnNnn
+			mov ecx, [esp]
+			shr ecx, 8
+			and ecx, 0x0F
+			mov ch, [hex_table + ecx]
+			mov byte [obuffer + edi + 5], ch
+
+			;nnnnnnNn
+			mov ecx, [esp]
+			shr ecx, 4
+			and ecx, 0x0F
+			mov ch, [hex_table + ecx]
+			mov byte [obuffer + edi + 6], ch
+
+			;nnnnnnnN
+			mov ecx, [esp]
+			;shr ecx, 0
+			and ecx, 0x0F
+			mov ch, [hex_table + ecx]
+			mov byte [obuffer + edi + 7], ch
+
+			add edi, 8
+
+		pop ecx
+		ret
