@@ -30,7 +30,7 @@
 %define STDOUT		1
 
 ;Input and output buffer sizes
-%define BUFFER_SIZE	512
+%define BUFFER_SIZE	4096
 
 global _start
 
@@ -65,126 +65,114 @@ section .data
 		db `		ret\n`
 		db `	_start:\n`
 		db `		xor esi, esi\n`
-	header_length: equ $-header
-	times (BUFFER_SIZE - header_length) db 0
+		.length: equ $-header
+	times (BUFFER_SIZE - header.length) db 0
 
+	;Footer for the compiled program
 	footer:
 		db `		mov eax, 1\n`
 		db `		mov ebx, 0\n`
 		db `		int 0x80\n`
-	footer_length: equ $-footer
+		.length: equ $-footer
 
 	;Compiled code for a single left shift of the tape
 	shift_left:
 		db `		dec si\n`
-	shift_left_length: equ $-shift_left
+		.length: equ $-shift_left
 
 	;Compiled code for a single right shift of the tape
 	shift_right:
 		db `		inc si\n`
-	shift_right_length: equ $-shift_right
+		.length: equ $-shift_right
 
-	;Compiled code for a single shift in either direction of more than one unit
+	;Compiled code for a shift in either direction of more than one unit;
+	;This will be appended by a word parameter
 	shift_long:
 		db `		add si, `
-	shift_long_length: equ $-shift_long
+		.length: equ $-shift_long
 
 	;Compiled code for a decrement of the current tape value
 	add_minus:
 		db `		dec byte [tape + esi]\n`
-	add_minus_length: equ $-add_minus
+		.length: equ $-add_minus
 
 	;Compiled code for an increment of the current tape value
 	add_plus:
 		db `		inc byte [tape + esi]\n`
-	add_plus_length: equ $-add_plus
+		.length: equ $-add_plus
 
-	;Compiled code for an arbitrary addition/subtraction
+	;Compiled code for an arbitrary addition/subtraction;
+	;This will be appended with a byte parameter
 	add_long:
 		db `		add byte [tape + esi], `
-	add_long_length: equ $-add_long
+		.length: equ $-add_long
 
-	;Compiled code for a loop opening
+	;Compiled code for a loop opening;
+	;This will be appended with integer IDs for the end and beginning intervals
 	loop_open:
 		db `		cmp byte [tape + esi], 0\n`
 		db `		je e`
-	loop_open_length: equ $-loop_open
+		.length: equ $-loop_open
 
-	;Compiled code for a loop closing
+	;Compiled code for a loop closing;
+	;This will be appended with integer IDs for the beginning and end intervals
 	loop_close:
 		db `		cmp byte [tape + esi], 0\n`
 		db `		jne b`
-	loop_close_length: equ $-loop_close
+		.length: equ $-loop_close
 
 	;Compiled code for character input
 	input:
 		db `		call read_character\n`
-	input_length: equ $-input
+		.length: equ $-input
 
 	;Compiled code for character output
 	output:
 		db `		call write_character\n`
-	output_length: equ $-output
+		.length: equ $-output
+
+	;Error messages for input in which extraneous '[' or '] characters are present
+	stray_open_message:
+		db `;Error: unmatched '[' in input\n`
+		.length: equ $-stray_open_message
+	stray_close_message:
+		db `\n;Error: unmatched ']' in input\n`
+		.length: equ $-stray_close_message
 section .text
 	;Main
 	_start:
 		;Output buffer initially contains the header data
-		mov edi, header_length
+		mov edi, header.length
 
-		;Zero is a sentinel value for our loop stack. Also zero out the counter.
-		push 0
-		xor ebx, ebx
 
-		;Null opcode
-		xor edx, edx
+		;Zero out some important values
+		xor ebx, ebx ;Loop counter
+		mov edx, ebx ;Operation count
+		push ebx ;Loop stack sentinel value
 
 		;Read until EOF
-		input_loop:
+		.input_loop:
 			;Fill buffer
 			call fill_input_buffer
 			cmp eax, 0
-			je input_loop_break
+			je .input_loop_break
 
 			;Process input
-			process_loop:
+			.process_loop:
 				;Read in the current character
 				mov dl, [ibuffer + esi]
-
-				;Basically a big switch
-
-				cmp dl, '+'
-				je op_plus
-				cmp dl, '-'
-				je op_minus
-
-				cmp dl, '>'
-				je op_right
-				cmp dl, '<'
-				je op_left
-
-				cmp dl, '.'
-				je op_output
-				cmp dl, ','
-				je op_input
-
-				cmp dl, '['
-				je op_loop_open
-				cmp dl, ']'
-				je op_loop_close
-
-				;Default
-				jmp op_none
 
 				;Plus/minus and tape movement operations can fold into themselves,
 				;and are thus compiled seperately in flush_last_op.
 				;Plus/minus operations store their rolling count in cl (since they work with byte values);
 				;tape movement ops work with words, therefore their count values are stored in cx
 
-				;Plus/minus operations store their count
-				op_plus:
+				cmp dl, '+'
+				jne .not_plus
+				.plus:
 					;Check for repetition
 					cmp dh, '+'
-					je op_plus_again
+					je .pagain
 
 					;Possibly flush the old operation
 					call flush_last_op
@@ -194,16 +182,19 @@ section .text
 					xor ecx, ecx
 
 					;Increment count
-					op_plus_again:
+					.pagain:
 						inc cl
 
-					jmp op_none
+					jmp .none
+				.not_plus:
 
-				;Note that op_minus is nearly symmetrical to op_plus
-				op_minus:
+				;Note that is nearly symmetrical to op_plus
+				cmp dl, '-'
+				jne .not_minus
+				.minus:
 					;Check for repetition
 					cmp dh, '+'
-					je op_minus_again
+					je .magain
 
 					;Possibly flush the old operation
 					call flush_last_op
@@ -213,16 +204,18 @@ section .text
 					xor ecx, ecx
 
 					;Decrement count
-					op_minus_again:
+					.magain:
 						dec cl
 
-					jmp op_none
+					jmp .none
+				.not_minus:
 
-				;op_right and op_left are analgous to op_plus and op_mins
-				op_right:
+				cmp dl, '>'
+				jne .not_right
+				.right:
 					;Check for repitition
 					cmp dh, '>'
-					je op_right_again
+					je .ragain
 
 					;Possibly flush the old operation
 					call flush_last_op
@@ -232,29 +225,32 @@ section .text
 					xor ecx, ecx
 
 					;Note that tape movement operations store their count in the 16 bit cx register
-					op_right_again:
+					.ragain:
 						inc cx
 
-					jmp op_none
+					jmp .none
+				.not_right:
 
-				;Inverse of op_right
-				op_left:
+				cmp dl, '<'
+				jne .not_left
+				.left:
 					cmp dh, '>'
-					je op_left_again
+					je .lagain
 
 					call flush_last_op
 
 					mov dh, '>'
 					xor ecx, ecx
 
-					op_left_again:
+					.lagain:
 						dec cx
 
-					jmp op_none
+					jmp .none
+				.not_left:
 
-				;Input and output compilation is just a simple string output, so it's simple to handle them here
-				;I'm pretty sure pushing/popping ecx isn't necessary, since it's only used in the context of move/add ops
-				op_output:
+				cmp dl, '.'
+				jne .not_output
+				.output:
 					;Flush last op
 					call flush_last_op
 
@@ -262,13 +258,16 @@ section .text
 					push esi
 					;push ecx
 					mov esi, output
-					mov ecx, output_length
+					mov ecx, output.length
 					call write_to_output
 					;pop ecx
 					pop esi
-					jmp op_none
+					jmp .none
+				.not_output:
 
-				op_input:
+				cmp dl, ','
+				jne .not_input
+				.input:
 					;Flush last op
 					call flush_last_op
 
@@ -276,18 +275,21 @@ section .text
 					push esi
 					;push ecx
 					mov esi, input
-					mov ecx, input_length
+					mov ecx, input.length
 					call write_to_output
 					;pop ecx
 					pop esi
-					jmp op_none
+					jmp .none
+				.not_input:
 
-				op_loop_open:
+				cmp dl, '['
+				jne .not_loop_open
+				.loop_open:
 					call flush_last_op
 
 					push esi
 					mov esi, loop_open
-					mov ecx, loop_open_length
+					mov ecx, loop_open.length
 					call write_to_output
 					pop esi
 
@@ -296,9 +298,9 @@ section .text
 					call write_ecx_to_output
 
 					cmp edi, BUFFER_SIZE - 4
-					jl .no_flush
+					jl .ono_flush
 					call flush_output_buffer
-					.no_flush:
+					.ono_flush:
 
 					mov dword[obuffer + edi], `\n\t\tb`
 					add edi, 4
@@ -308,24 +310,35 @@ section .text
 					add edi, 2
 
 					push ebx
-					jmp op_none
+					jmp .none
+				.not_loop_open:
 
-				op_loop_close:
+				cmp dl, ']'
+				jne .not_loop_close
+				.loop_close:
 					call flush_last_op
 
 					push esi
 					mov esi, loop_close
-					mov ecx, loop_close_length
+					mov ecx, loop_close.length
 					call write_to_output
 					pop esi
 
 					pop ecx
+
+					cmp ecx, 0
+					jne .loop_close_safe
+						mov esi, stray_close_message
+						mov ecx, stray_close_message.length
+						call write_to_output
+						jmp die_flush
+					.loop_close_safe:
 					call write_ecx_to_output
 
 					cmp edi, BUFFER_SIZE - 4
-					jl .no_flush
+					jl .cno_flush
 					call flush_output_buffer
-					.no_flush:
+					.cno_flush:
 
 					mov dword[obuffer + edi], `\n\t\te`
 					add edi, 4
@@ -334,21 +347,31 @@ section .text
 					mov byte [obuffer + edi + 1], `\n`
 					add edi, 2
 
-					jmp op_none
+					jmp .none
+				.not_loop_close:
 
-				op_none:
+				.none:
 
 				inc esi
 				cmp esi, eax
-				jl process_loop
+				jl .process_loop
 
-			jmp input_loop
-		input_loop_break:
+			jmp .input_loop
+		.input_loop_break:
 
 		call flush_last_op
 
-		mov ecx, footer_length
+		pop ecx
+		cmp ecx, 0
+		je .loop_open_safe
+			mov esi, stray_open_message
+			mov ecx, stray_open_message.length
+			call write_to_output
+			jmp die_flush
+		.loop_open_safe:
+
 		mov esi, footer
+		mov ecx, footer.length
 		call write_to_output
 
 		call flush_output_buffer
@@ -503,7 +526,7 @@ section .text
 			push ecx
 
 			;Copy the header for the operation
-			mov ecx, add_long_length
+			mov ecx, add_long.length
 			mov esi, add_long
 			call write_to_output
 			mov esi, [esp + 4 * 1] ;Restore input pointer
@@ -544,12 +567,12 @@ section .text
 
 			;Increments/decrements are basically just string copies
 			compile_add_inc:
-				mov ecx, add_plus_length
+				mov ecx, add_plus.length
 				mov esi, add_plus
 				call write_to_output
 				jmp write_current_op_return
 			compile_add_dec:
-				mov ecx, add_minus_length
+				mov ecx, add_minus.length
 				mov esi, add_minus
 				call write_to_output
 				jmp write_current_op_return
@@ -565,7 +588,7 @@ section .text
 			push ecx ;Gonna need this later, again
 
 			;Copy the header for the operation
-			mov ecx, shift_long_length
+			mov ecx, shift_long.length
 			mov esi, shift_long
 			call write_to_output
 			mov esi, [esp + 4 * 1] ;Restore input pointer
@@ -620,12 +643,12 @@ section .text
 
 			;Special cases
 			compile_shift_right:
-				mov ecx, shift_right_length
+				mov ecx, shift_right.length
 				mov esi, shift_right
 				call write_to_output
 				jmp write_current_op_return
 			compile_shift_left:
-				mov ecx, shift_left_length
+				mov ecx, shift_left.length
 				mov esi, shift_left
 				call write_to_output
 				jmp write_current_op_return
